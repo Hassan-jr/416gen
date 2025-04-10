@@ -54,7 +54,8 @@ RUN python -m pip install --upgrade pip
 # Build arguments for the model
 # Default to Flux Schnell base model
 ARG MODEL_REPO_ID="black-forest-labs/FLUX.1-schnell"
-ENV MODEL_TAG=${MODEL_REPO_ID} # Use the repo ID as the tag for consistency
+# Use the repo ID as the tag for consistency (passed to rp_handler.py via CMD)
+ENV MODEL_TAG=${MODEL_REPO_ID}
 
 # Install Python dependencies
 COPY builder/requirements.txt /requirements.txt
@@ -82,5 +83,5 @@ COPY src .
 # EXPOSE 8080
 
 # Set the entrypoint command
-# Pass the MODEL_TAG (which is the repo ID) to the handler script
+# MODEL_TAG environment variable is now available at runtime
 CMD python -u /rp_handler.py
