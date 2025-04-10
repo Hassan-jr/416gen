@@ -15,7 +15,7 @@ import torch
 from diffusers import FluxPipeline
 
 # Define the model cache directory (should match Dockerfile ENV)
-MODEL_CACHE_DIR = "/diffusers-cache"
+# MODEL_CACHE_DIR = "/diffusers-cache"
 # Use bfloat16 if supported, float16 otherwise
 TORCH_DTYPE_DOWNLOAD = torch.bfloat16
 
@@ -27,9 +27,9 @@ def download_model():
     Downloads the specified Flux model pipeline using FluxPipeline.
     This handles downloading all necessary components (UNet, VAE, text encoders, tokenizers).
     '''
-    model_cache_path = Path(MODEL_CACHE_DIR)
-    model_cache_path.mkdir(parents=True, exist_ok=True)
-    print(f"Ensured cache directory exists: {model_cache_path}")
+    # model_cache_path = Path(MODEL_CACHE_DIR)
+    # model_cache_path.mkdir(parents=True, exist_ok=True)
+    # print(f"Ensured cache directory exists: {model_cache_path}")
 
     print(f"Downloading Flux model pipeline: {MODEL_REPO_ID}...")
     print(f"Using dtype for download: {TORCH_DTYPE_DOWNLOAD}")
@@ -39,7 +39,7 @@ def download_model():
         _ = FluxPipeline.from_pretrained(
             MODEL_REPO_ID,
             torch_dtype=TORCH_DTYPE_DOWNLOAD,
-            cache_dir=model_cache_path,
+            # cache_dir=model_cache_path,
         )
         print(f"Model components for {MODEL_REPO_ID} downloaded successfully.")
 
