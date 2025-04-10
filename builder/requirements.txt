@@ -1,22 +1,27 @@
 # Base RunPod dependency
 # Specify the extra index URL for CUDA 12.1 compatible packages
---extra-index-url https://download.pytorch.org/whl/cu121
+# --extra-index-url https://download.pytorch.org/whl/cu121
+--index-url https://download.pytorch.org/whl/cu124
 
 # Base RunPod dependency
 runpod~=1.7.0
 huggingface-hub==0.25.2
 
 # Core ML Libraries (Pinned to specific versions compatible with CUDA 12.1)
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
-torchaudio==2.5.1+cu121
+# !pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+# torch==2.5.1+cu121
+torch==2.5.1
+# torchvision==0.20.1+cu121
+torchvision==0.20.1
+# torchaudio==2.5.1+cu121
+torchaudio==2.5.1 
 transformers==4.39.3
 diffusers==0.32
 accelerate==0.29.3
 safetensors>=0.4.0
 
 # Optional: For potential speedups (Check compatibility if issues arise)
-# xformers==0.0.25
+xformers
 
 # R2 Interaction
 boto3>=1.28.0
