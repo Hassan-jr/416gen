@@ -10,15 +10,16 @@ import argparse
 from pathlib import Path
 from urllib.parse import urlparse
 import traceback
+import torch
 
 # Import Flux pipeline and necessary transformers components
-from diffusers import FluxSchnellPipeline
+from diffusers import FluxPipeline
 from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
 # Define the model cache directory
 MODEL_CACHE_DIR = "diffusers-cache"
 # Recommended dtype for Flux download/cache (often stored in fp16 or bf16)
-TORCH_DTYPE_DOWNLOAD = torch.bfloat16 # Or float16
+TORCH_DTYPE_DOWNLOAD = torch.float16 # Or float16
 
 def download_model(model_repo_id: str):
     '''
@@ -37,7 +38,7 @@ def download_model(model_repo_id: str):
     try:
         # 1. Download the main Flux pipeline
         # This will also download the UNet, VAE, and potentially schedulers
-        FluxSchnellPipeline.from_pretrained(
+        FluxPipeline.from_pretrained(
             model_repo_id,
             torch_dtype=TORCH_DTYPE_DOWNLOAD,
             cache_dir=model_cache_path,

@@ -6,8 +6,8 @@ from PIL import Image
 from typing import List, Tuple, Optional
 import traceback
 
-# Use FluxSchnellPipeline
-from diffusers import FluxSchnellPipeline, FluxControlNetPipeline # Add ControlNet if needed later
+# Use FluxPipeline
+from diffusers import FluxPipeline # Add ControlNet if needed later
 # Schedulers are usually handled internally by Flux pipelines, but import if needed
 # from diffusers import EulerDiscreteScheduler # Example
 
@@ -16,7 +16,7 @@ from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
 MODEL_CACHE = "diffusers-cache"
 # Recommended dtype for Flux
-TORCH_DTYPE = torch.bfloat16 # or torch.float16 if bfloat16 not supported/problematic
+TORCH_DTYPE = torch.float16 # or torch.float16 if bfloat16 not supported/problematic
 
 class Predictor:
     ''' Predictor class for Flux.1 Schnell '''
@@ -52,7 +52,7 @@ class Predictor:
             )
 
 
-            self.pipe = FluxSchnellPipeline.from_pretrained(
+            self.pipe = FluxPipeline.from_pretrained(
                 self.model_tag,
                 # Pass the pre-loaded components if required by the specific diffusers version
                 # text_encoder=text_encoder,
