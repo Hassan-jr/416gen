@@ -15,7 +15,7 @@ This repository contains the worker for the SDv1 AI Endpoints. The following doc
 - [Anything v4](https://docs.runpod.io/reference/anything-v4)
 - [OpenJourney](https://docs.runpod.io/reference/openjourney-sd-v15)
 
-## Docker Image
+## Docker Image 2
 
 The docker image requires two build arguments `MODEL_URL` and `Model_TAG` to build the image. The `MODEL_URL` is the url of the model repository and the `Model_TAG` is the tag of the model repository.
 
