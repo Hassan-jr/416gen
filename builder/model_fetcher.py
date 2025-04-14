@@ -20,7 +20,7 @@ from diffusers import FluxPipeline
 TORCH_DTYPE_DOWNLOAD = torch.bfloat16
 
 # Hardcode the model ID
-MODEL_REPO_ID = "black-forest-labs/FLUX.1-schnell"
+MODEL_REPO_ID = "black-forest-labs/FLUX.1-dev"
 
 def download_model():
     '''

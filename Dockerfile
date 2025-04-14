@@ -49,7 +49,7 @@ RUN apt-get update -y && \
 RUN python -m pip install --upgrade pip
 
 # Model ID is hardcoded in scripts, ARG/ENV no longer needed here
-# ARG MODEL_REPO_ID="black-forest-labs/FLUX.1-schnell"
+# ARG MODEL_REPO_ID="black-forest-labs/FLUX.1-dev"
 # ENV MODEL_TAG=${MODEL_REPO_ID}
 
 # Install Python dependencies
