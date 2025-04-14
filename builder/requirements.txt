@@ -32,3 +32,5 @@ protobuf
 # Optional: xformers (can sometimes help, but adds dependency complexity)
 xformers
 python-dotenv
+
+peft==0.10.0

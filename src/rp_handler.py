@@ -79,7 +79,7 @@ def upload_to_r2(image_bytes, bucket_name, object_key, r2_config):
         )
 
         # Construct the public URL
-        public_url = f"{base_endpoint_url}/{bucket_name}/{object_key}"
+        public_url = f"{object_key}"
         print(f"Upload successful. URL: {public_url}")
         return public_url
 
@@ -185,14 +185,15 @@ def run(job):
             task_start_time = time.time()
             print(f"\nProcessing generation task {index + 1}/{len(generation_tasks)}...")
             prompt = task['prompt']
+            num_inference_steps = task['num_inference_steps']
             num_outputs = task.get('num_outputs', 1)
             seed = task.get('seed') if task.get('seed') is not None else int.from_bytes(os.urandom(4), "big")
 
             # Ensure minimum steps, default to predictor's minimum if not specified
-            num_inference_steps_input = task.get('num_inference_steps', predict.MIN_INFERENCE_STEPS)
-            num_inference_steps = max(num_inference_steps_input, predict.MIN_INFERENCE_STEPS)
-            if num_inference_steps != num_inference_steps_input:
-                 print(f"  Adjusted inference steps from {num_inference_steps_input} to {num_inference_steps}")
+            # num_inference_steps_input = task.get('num_inference_steps', predict.MIN_INFERENCE_STEPS)
+            # num_inference_steps = max(num_inference_steps_input, predict.MIN_INFERENCE_STEPS)
+            # if num_inference_steps != num_inference_steps_input:
+            #      print(f"  Adjusted inference steps from {num_inference_steps_input} to {num_inference_steps}")
 
             print(f"  Prompt: {prompt[:100]}...")
             print(f"  Num Outputs: {num_outputs}, Seed: {seed}, Steps: {num_inference_steps}")

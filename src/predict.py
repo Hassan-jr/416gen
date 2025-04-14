@@ -84,8 +84,6 @@ class Predictor:
 
         start_time = time.time()
 
-        # --- LoRA Handling (Load First Time Only) ---
-        cross_attention_kwargs = None
         # Try to load LoRA only if one hasn't been loaded before AND a path is given now
         if not self._lora_loaded_once and lora_path:
             print(f"First time LoRA request. Attempting load: {os.path.basename(lora_path)}")
@@ -95,7 +93,6 @@ class Predictor:
                     self.pipe.load_lora_weights(lora_path)
                     self._lora_loaded_once = True # Mark LoRA as loaded
                     self._lora_path_used = lora_path # Store which LoRA was loaded
-                    cross_attention_kwargs = {"scale": lora_scale} # Use current scale
                     print(f"Successfully loaded LoRA: {os.path.basename(lora_path)}")
                 except Exception as e:
                     # This includes errors if 'peft' is missing or load fails
@@ -104,12 +101,6 @@ class Predictor:
                     # Proceed without LoRA for this and future calls
             else:
                 print(f"Warning: LoRA file not found at: {lora_path}. Proceeding without LoRA.")
-
-        # If LoRA was loaded previously, reuse it with the *current* call's scale
-        elif self._lora_loaded_once:
-            # print(f"Using previously loaded LoRA: {os.path.basename(self._lora_path_used)} with scale {lora_scale}") # Optional debug
-            cross_attention_kwargs = {"scale": lora_scale}
-        # --- End LoRA Handling ---
 
         # --- Seed Generation ---
         if seed is None:
@@ -133,7 +124,6 @@ class Predictor:
                     num_images_per_prompt=num_outputs,
                     generator=generators,
                     output_type="pil",
-                    cross_attention_kwargs=cross_attention_kwargs # Apply scale if LoRA active
                 )
             images = pipeline_output.images
 
