@@ -359,7 +359,6 @@
 #     print("Starting RunPod serverless handler...")
 #     runpod.serverless.start({"handler": run})
 
-
 # rp_handler.py
 import os
 import uuid
@@ -372,14 +371,13 @@ from typing import Optional # For type hinting
 
 import runpod
 from runpod.serverless.utils.rp_validator import validate
-# from runpod.serverless.utils import rp_cleanup # rp_cleanup might not be needed with manual file handling
+# from runpod.serverless.utils import rp_cleanup # Not strictly needed with manual file handling
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from rp_schema import INPUT_SCHEMA
-# Import the *new* Predictor class that uses the full pipeline
+from rp_schema import INPUT_SCHEMA # Make sure you have this file with your schema
 import predict # Your predict.py
 
 # Global predictor instance
@@ -401,7 +399,7 @@ def download_file(url, save_path):
         print(f"Error downloading {url}: {e}")
         return False
     except Exception as e:
-        print(f"An unexpected error occurred during download: {e}")
+        print(f"An unexpected error occurred during download of {url}: {e}")
         return False
 
 # --- upload_to_r2 function ---
@@ -422,11 +420,12 @@ def upload_to_r2(image_bytes, bucket_name, object_key, r2_config):
             aws_access_key_id=r2_config['access_key_id'],
             aws_secret_access_key=r2_config['secret_access_key'],
             config=Config(s3={'addressing_style': 'virtual'}, retries={'max_attempts': 3}),
-            region_name='auto'
+            region_name='auto' # R2 specific
         )
         s3_client.put_object(
             Bucket=bucket_name, Key=object_key, Body=image_bytes, ContentType='image/png'
         )
+        # Construct the public URL (ensure your R2 bucket has public access configured if needed)
         public_url = f"{base_endpoint_url}/{bucket_name}/{object_key}"
         print(f"Upload successful. URL: {public_url}")
         return public_url
@@ -434,7 +433,8 @@ def upload_to_r2(image_bytes, bucket_name, object_key, r2_config):
         print(f"ERROR: Boto3 EndpointConnectionError connecting to R2 '{base_endpoint_url}'. Details: {e}")
         return None
     except ClientError as e:
-        print(f"ERROR: Boto3 ClientError uploading to R2 (Code: {e.response.get('Error', {}).get('Code')}): {e}")
+        error_code = e.response.get('Error', {}).get('Code')
+        print(f"ERROR: Boto3 ClientError uploading to R2 (Code: {error_code}): {e}")
         return None
     except Exception as e:
         print(f"ERROR: Unexpected error uploading to R2: {e}")
@@ -446,7 +446,7 @@ def run(job):
     global MODEL
 
     job_input = job['input']
-    job_id = job.get('id', 'local_test') # Get job ID for logging
+    job_id = job.get('id', f"local_job_{uuid.uuid4()}") # Get job ID for logging or generate one
     print(f"\n--- Received Job ID: {job_id} ---")
 
     # --- Input Validation ---
@@ -460,12 +460,12 @@ def run(job):
     # --- Extract Config ---
     instance_id = validated_input['instanceId']
     lora_url = validated_input.get('lora_url')
-    lora_scale_input = validated_input.get('lora_scale', 0.8)
+    lora_scale_input = validated_input.get('lora_scale', 0.8) # Default LoRA scale if not provided
 
     # --- R2 Config ---
     r2_endpoint_url_input = validated_input['r2_endpoint_url']
     if not r2_endpoint_url_input or not r2_endpoint_url_input.startswith("https"):
-         print(f"Job {job_id}: Invalid R2 endpoint URL.")
+         print(f"Job {job_id}: Invalid R2 endpoint URL: {r2_endpoint_url_input}")
          return {"error": "Invalid or missing 'r2_endpoint_url'. Must be base HTTPS URL."}
     r2_config = {
         'bucket_name': validated_input['r2_bucket_name'],
@@ -487,10 +487,22 @@ def run(job):
          except Exception as e:
             print(f"Job {job_id}: FATAL - Lazy initialization of predictor/pipeline FAILED: {e}")
             traceback.print_exc()
-            # If setup fails here, the job cannot proceed.
             return {"error": f"Model predictor failed to initialize during job execution: {e}"}
     else:
-        print(f"Job {job_id}: Global MODEL already initialized. Using existing instance.")
+        # Optional: Check if the existing MODEL.pipe is valid, though Predictor.predict() will do this.
+        if MODEL.pipe is None:
+            print(f"Job {job_id}: Global MODEL exists but its pipe is None. This indicates a past setup failure. Attempting re-initialization...")
+            try:
+                MODEL.setup() # Try to re-run setup on the existing instance
+                if MODEL.pipe is None: # If still None after re-setup
+                    raise RuntimeError("Re-setup of existing MODEL failed to initialize the pipe.")
+                print(f"Job {job_id}: Re-setup of MODEL successful.")
+            except Exception as e:
+                print(f"Job {job_id}: FATAL - Re-initialization of existing MODEL FAILED: {e}")
+                traceback.print_exc()
+                return {"error": f"Model predictor re-initialization failed: {e}"}
+        else:
+            print(f"Job {job_id}: Global MODEL already initialized and pipe seems valid. Using existing instance.")
     # --- End Initialization ---
 
     # --- Download LoRA (if needed) ---
@@ -501,7 +513,7 @@ def run(job):
     if lora_url:
         print(f"Job {job_id}: LoRA URL provided ({lora_url}), attempting download...")
         # Use a unique temp filename in /tmp
-        temp_lora_filename = f"/tmp/downloaded_lora_{uuid.uuid4()}.safetensors"
+        temp_lora_filename = f"/tmp/downloaded_lora_{uuid.uuid4()}.safetensors" # Ensure /tmp exists
         if download_file(lora_url, temp_lora_filename):
             lora_download_path = temp_lora_filename
             lora_file_available = True
@@ -509,8 +521,6 @@ def run(job):
             print(f"Job {job_id}: LoRA downloaded successfully to {lora_download_path}")
         else:
             print(f"Job {job_id}: Warning - LoRA download failed from {lora_url}. Will proceed without LoRA.")
-            # Optional: return error if LoRA is essential
-            # return {"error": f"Failed to download required LoRA from {lora_url}"}
     else:
         print(f"Job {job_id}: No LoRA URL provided.")
     # --- End LoRA Download ---
@@ -526,11 +536,9 @@ def run(job):
             print(f"\nJob {job_id}: Processing generation task {index + 1}/{len(generation_tasks)}...")
             prompt = task['prompt']
             num_outputs = task.get('num_outputs', 1)
-            # Ensure seed is an int, generate if None
             raw_seed = task.get('seed')
-            seed = int(raw_seed) if raw_seed is not None else None # Predictor handles None seed
+            seed = int(raw_seed) if raw_seed is not None else None # Predictor handles None seed by generating one
 
-            # Ensure minimum steps, default to predictor's minimum if not specified
             # predict.MIN_INFERENCE_STEPS must be defined in predict.py
             num_inference_steps_input = task.get('num_inference_steps', predict.MIN_INFERENCE_STEPS)
             num_inference_steps = max(num_inference_steps_input, predict.MIN_INFERENCE_STEPS)
@@ -546,7 +554,7 @@ def run(job):
                 "width": task.get('width', 1024),
                 "height": task.get('height', 1024),
                 "num_inference_steps": num_inference_steps,
-                "guidance_scale": task.get('guidance_scale', 7.0), # Default guidance if not Flux specific
+                "guidance_scale": task.get('guidance_scale', 4.0), # Default for Flux, adjust if needed
                 "num_outputs": num_outputs,
                 "seed": seed,
                 "lora_path": lora_download_path if lora_file_available else None,
@@ -557,7 +565,7 @@ def run(job):
                 "prompt": prompt, "negative_prompt": predict_args["negative_prompt"],
                 "width": predict_args["width"], "height": predict_args["height"],
                 "num_outputs": num_outputs, "num_inference_steps": num_inference_steps,
-                "guidance_scale": predict_args["guidance_scale"], "seed": seed, # Record base seed for task
+                "guidance_scale": predict_args["guidance_scale"], "seed": seed, # Base seed for the task
                 "lora_url": lora_url if lora_file_available else None,
                 "lora_scale_requested": lora_scale_input,
                 "images": [], "task_duration_seconds": None, "error": None
@@ -571,7 +579,7 @@ def run(job):
                      task_results["error"] = "Image generation produced no output or failed internally."
                      for i in range(num_outputs): # Add placeholders
                           task_results["images"].append({
-                                "url": None, "seed": (seed if seed is not None else 0) + i, "error": task_results["error"]
+                                "url": None, "seed": (seed if seed is not None else i), "error": task_results["error"]
                           })
 
                 for img_path, img_actual_seed in generated_images_info:
@@ -584,20 +592,23 @@ def run(job):
                         if r2_url:
                             task_results["images"].append({"url": r2_url, "seed": img_actual_seed})
                         else:
+                            print(f"  Job {job_id}: Upload to R2 failed for image with seed {img_actual_seed}.")
                             task_results["images"].append({"url": None, "seed": img_actual_seed, "error": "Upload to R2 failed"})
                     except FileNotFoundError:
+                         print(f"  Job {job_id}: Generated file {img_path} (seed {img_actual_seed}) not found for upload.")
                          task_results["images"].append({"url": None, "seed": img_actual_seed, "error": f"Generated file {img_path} not found."})
                     except Exception as upload_err:
+                         print(f"  Job {job_id}: Error during upload process for image with seed {img_actual_seed}: {upload_err}")
+                         traceback.print_exc()
                          task_results["images"].append({"url": None, "seed": img_actual_seed, "error": f"Upload process failed: {upload_err}"})
 
-            except RuntimeError as e: # Catch "Predictor not set up" specifically
+            except RuntimeError as e: # Catch "Predictor not set up" specifically or other critical runtime issues
                 print(f"  Job {job_id}: CRITICAL ERROR during MODEL.predict() for task {index+1}: {e}")
                 traceback.print_exc()
                 task_results["error"] = f"Prediction failed critically: {str(e)}"
-                # If this happens, it's likely MODEL.pipe is None, so all outputs will fail
                 for i in range(num_outputs):
                       task_results["images"].append({
-                            "url": None, "seed": (seed if seed is not None else 0) + i, "error": task_results["error"]
+                            "url": None, "seed": (seed if seed is not None else i), "error": task_results["error"]
                       })
             except Exception as e:
                 print(f"  Job {job_id}: Error during MODEL.predict() execution for task {index+1}: {e}")
@@ -605,7 +616,7 @@ def run(job):
                 task_results["error"] = f"Prediction failed: {str(e)}"
                 for i in range(num_outputs): # Add placeholders
                       task_results["images"].append({
-                            "url": None, "seed": (seed if seed is not None else 0) + i, "error": task_results["error"]
+                            "url": None, "seed": (seed if seed is not None else i), "error": task_results["error"]
                       })
 
             task_end_time = time.time()
@@ -617,7 +628,7 @@ def run(job):
         print(f"\nJob {job_id}: Finished all {len(generation_tasks)} tasks in {round(overall_end_time - overall_start_time, 2)} seconds.")
 
     finally:
-        print(f"Job {job_id}: Starting cleanup...")
+        print(f"\nJob {job_id}: Starting cleanup...")
         if temp_lora_file_to_clean and os.path.exists(temp_lora_file_to_clean):
             try:
                 os.remove(temp_lora_file_to_clean)
@@ -640,7 +651,7 @@ def run(job):
 # --- Main Execution (for worker startup) ---
 if __name__ == "__main__":
     print("--- Worker Starting ---")
-    # Use a temporary variable for initialization to control global MODEL assignment
+    # Attempt to initialize the model globally at startup
     initialized_model_successfully = False
     try:
         print("Attempting to initialize global predictor (loading FULL pipeline)...")
@@ -650,7 +661,7 @@ if __name__ == "__main__":
         print("Global predictor initialized and pipeline loaded successfully.")
         initialized_model_successfully = True
     except Exception as e:
-        print(f"FATAL: Global model initialization FAILED during setup: {e}")
+        print(f"FATAL: Global model initialization FAILED during startup: {e}")
         traceback.print_exc()
         MODEL = None # Explicitly ensure MODEL is None if global setup fails
 
@@ -658,9 +669,9 @@ if __name__ == "__main__":
         print("WARNING: Global model initialization failed. Worker will attempt lazy load on first job.")
         # If the model is critical for the worker to even start, you might want to exit:
         # import sys
-        # print("Exiting due to critical model initialization failure.")
+        # print("Exiting due to critical model initialization failure at startup.")
         # sys.exit(1)
 
     print("Starting RunPod serverless handler...")
-    runpod.serverless.start({"handler": run})
-    print("--- Worker Exiting ---")
+    runpod.serverless.start({"handler": run, "concurrency_modifier": lambda x:1}) # Set concurrency to 1 if model is large and not thread-safe for setup
+    print("--- Worker Exited ---") # This line might not be reached if runpod.serverless.start() blocks indefinitely

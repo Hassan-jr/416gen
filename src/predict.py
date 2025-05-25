@@ -151,7 +151,6 @@
 #         # print(f"Predict call finished in {time.time() - start_time:.2f}s") # Optional debug
 #         return output_paths
 
-
 # predict.py
 
 import os
@@ -168,24 +167,66 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Configuration Constants ---
 TORCH_DTYPE = torch.bfloat16
 MODEL_REPO_ID = "black-forest-labs/FLUX.1-dev"
-MIN_INFERENCE_STEPS = 10 # Define the minimum inference steps here
+MIN_INFERENCE_STEPS = 10
 
 class Predictor:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.pipe: Optional[FluxPipeline] = None
-        self.current_lora_adapter_name = "flux_active_lora" # Consistent name for management
+        self.lora_adapter_name = "active_lora" # Consistent name used for PEFT
+
+        # Track currently active LoRA to avoid redundant operations
+        self.active_lora_path: Optional[str] = None
+        self.active_lora_scale: Optional[float] = None
         print(f"Predictor initialized. Device: {self.device}")
 
+    def _unload_active_lora(self):
+        """Helper to unload the currently tracked active LoRA."""
+        if self.active_lora_path is None: # No LoRA is tracked as active
+            # As a safeguard, check if the adapter name still exists in peft_config
+            # and try to delete it if it does (e.g. if state tracking got out of sync)
+            if hasattr(self.pipe, "delete_adapters") and \
+               hasattr(self.pipe, "peft_config") and \
+               self.pipe.peft_config is not None and \
+               self.lora_adapter_name in self.pipe.peft_config:
+                print(f"  Warning: active_lora_path was None, but adapter '{self.lora_adapter_name}' found in peft_config. Attempting delete.")
+                try:
+                    self.pipe.delete_adapters(self.lora_adapter_name)
+                    print(f"  Adapter '{self.lora_adapter_name}' deleted (safeguard).")
+                except Exception as e:
+                    print(f"  Error during safeguard delete of adapter '{self.lora_adapter_name}': {e}")
+            return
+
+        print(f"  Unloading active LoRA: {os.path.basename(self.active_lora_path)} (Adapter: {self.lora_adapter_name})")
+        try:
+            if hasattr(self.pipe, "delete_adapters") and \
+               hasattr(self.pipe, "peft_config") and \
+               self.pipe.peft_config is not None and \
+               self.lora_adapter_name in self.pipe.peft_config:
+                self.pipe.delete_adapters(self.lora_adapter_name)
+                print(f"  Adapter '{self.lora_adapter_name}' deleted successfully.")
+            # Optional: A more general disable if the above doesn't fully clear
+            # elif hasattr(self.pipe, "disable_lora"):
+            #     self.pipe.disable_lora()
+            #     print(f"  Called pipe.disable_lora().")
+            else:
+                print(f"  Info: Could not specifically delete adapter '{self.lora_adapter_name}' (not found or method unavailable).")
+
+            self.active_lora_path = None
+            self.active_lora_scale = None
+        except Exception as e:
+            print(f"  Error during LoRA unload for {self.lora_adapter_name}: {e}")
+            # Attempt to reset tracking even if unload had issues
+            self.active_lora_path = None
+            self.active_lora_scale = None
+
+
     def setup(self):
-        ''' Loads the Flux pipeline model. Expected to be called once per instance. '''
         if self.pipe:
             print("Model (self.pipe) already loaded. Skipping setup.")
             return
-
         print(f"Loading model: {MODEL_REPO_ID} (Torch DType: {TORCH_DTYPE}, Device: {self.device})...")
         try:
             self.pipe = FluxPipeline.from_pretrained(
@@ -193,22 +234,11 @@ class Predictor:
                 torch_dtype=TORCH_DTYPE
             )
             self.pipe.to(self.device)
-            # Optional: if you need model CPU offloading and have less VRAM
-            # if self.device == "cuda":
-            #     try:
-            #         self.pipe.enable_model_cpu_offload()
-            #         print("Model CPU offload enabled.")
-            #     except AttributeError:
-            #         print("Warning: enable_model_cpu_offload not available for this pipeline version.")
-            #     except Exception as offload_e:
-            #         print(f"Warning: Could not enable model CPU offload: {offload_e}")
-
             print(f"Model '{MODEL_REPO_ID}' loaded successfully to {self.device}.")
         except Exception as e:
-            self.pipe = None # Ensure pipe is None if setup fails
+            self.pipe = None
             print(f"FATAL: Model loading failed during setup: {e}")
             traceback.print_exc()
-            # This error will be caught by the calling code (rp_handler.py)
             raise RuntimeError(f"Failed to load model '{MODEL_REPO_ID}' during setup") from e
 
     @torch.inference_mode()
@@ -217,127 +247,94 @@ class Predictor:
                 negative_prompt: Optional[str] = "",
                 width: int = 1024,
                 height: int = 1024,
-                num_inference_steps: int = 30, # Default, will be overridden by handler if provided & valid
+                num_inference_steps: int = 30,
                 guidance_scale: float = 4.0,
                 num_outputs: int = 1,
                 seed: Optional[int] = None,
-                lora_path: Optional[str] = None,
+                lora_path: Optional[str] = None, # Path from rp_handler
                 lora_scale: float = 0.8,
                 **kwargs) -> List[Tuple[str, int]]:
 
         if not self.pipe:
-            # This check is crucial. If self.pipe is None, setup() failed or was not called.
             raise RuntimeError("Predictor is not set up. Call setup() first or check for setup errors.")
 
         predict_start_time = time.time()
         print(f"\n--- Starting Predict Call ---")
         print(f"  Prompt: '{prompt[:100]}...'")
-        print(f"  LoRA Path: {lora_path}, LoRA Scale: {lora_scale}")
+        print(f"  Requested LoRA Path: {lora_path}, Requested LoRA Scale: {lora_scale}")
+        print(f"  Currently Active LoRA Path: {self.active_lora_path}, Scale: {self.active_lora_scale}")
 
-        # --- LoRA Handling (Dynamic: Unload old, load new if requested) ---
-        cross_attention_kwargs = None # Default to no LoRA effect / no scale
-
-        # 1. Unload/Delete any previously loaded LoRA adapter
-        try:
-            # Check if PEFT integration is used and if our adapter exists
-            if hasattr(self.pipe, "delete_adapters") and \
-               hasattr(self.pipe, "peft_config") and \
-               self.pipe.peft_config is not None and \
-               self.current_lora_adapter_name in self.pipe.peft_config:
-                print(f"  Attempting to delete previously loaded adapter: {self.current_lora_adapter_name}")
-                self.pipe.delete_adapters(self.current_lora_adapter_name)
-                print(f"  Adapter '{self.current_lora_adapter_name}' deleted.")
-            # Generic unload_lora_weights might be needed if not using named PEFT adapters
-            # or as a broader cleanup. Be cautious as it might error if no LoRAs are loaded.
-            # elif hasattr(self.pipe, "unload_lora_weights"):
-            # print(f"  Attempting to unload_lora_weights (generic)...")
-            # self.pipe.unload_lora_weights()
-            # print(f"  unload_lora_weights called.")
-        except Exception as e:
-            print(f"  Info: Issue during LoRA unloading (possibly none to unload or adapter not found): {e}")
-            # traceback.print_exc() # Uncomment for detailed debugging of unload issues
-
-        # 2. Load the new LoRA if a path is provided for the current request
-        if lora_path:
-            print(f"  Current request has LoRA: {os.path.basename(lora_path)}. Attempting load...")
-            if os.path.exists(lora_path):
+        # --- Smarter LoRA Management ---
+        if lora_path: # A LoRA is requested for this prediction
+            if not os.path.exists(lora_path):
+                print(f"  Warning: Requested LoRA file not found at: {lora_path}. Unloading any active LoRA.")
+                if self.active_lora_path:
+                    self._unload_active_lora()
+            elif self.active_lora_path != lora_path: # New LoRA or switching LoRA
+                print(f"  Switching LoRA. Old: {self.active_lora_path}, New: {os.path.basename(lora_path)}")
+                if self.active_lora_path: # Unload previous if one was active
+                    self._unload_active_lora()
                 try:
-                    # Load LoRA with our consistent adapter name.
-                    self.pipe.load_lora_weights(lora_path, adapter_name=self.current_lora_adapter_name)
-
-                    # Activation and Scaling:
-                    # FluxPipeline might activate on load. set_adapters is common for PEFT.
-                    # If scale is applied via cross_attention_kwargs, adapter_weights should be 1.0.
+                    print(f"  Loading new LoRA: {os.path.basename(lora_path)} with adapter name '{self.lora_adapter_name}'")
+                    self.pipe.load_lora_weights(lora_path, adapter_name=self.lora_adapter_name)
                     if hasattr(self.pipe, "set_adapters"):
-                         self.pipe.set_adapters([self.current_lora_adapter_name], adapter_weights=[1.0]) # Activate with base weight
-                         print(f"  Adapter '{self.current_lora_adapter_name}' activated using set_adapters.")
+                        self.pipe.set_adapters([self.lora_adapter_name], adapter_weights=[lora_scale])
+                        print(f"  Adapter '{self.lora_adapter_name}' loaded and set with scale {lora_scale}.")
                     else:
-                         print(f"  Warning: pipe does not have set_adapters. Assuming LoRA loaded by load_lora_weights is active by default.")
-
-                    cross_attention_kwargs = {"scale": lora_scale}
-                    print(f"  Successfully loaded LoRA: {os.path.basename(lora_path)} as adapter '{self.current_lora_adapter_name}'. Scale {lora_scale} will be applied via cross_attention_kwargs.")
-
+                        print(f"  Warning: pipe does not have set_adapters. LoRA scaling might not be applied as expected.")
+                    self.active_lora_path = lora_path
+                    self.active_lora_scale = lora_scale
                 except Exception as e:
-                    print(f"  ERROR loading LoRA weights from {lora_path}: {e}")
+                    print(f"  ERROR loading new LoRA weights from {lora_path}: {e}")
                     traceback.print_exc()
-                    print("  Proceeding without LoRA for this request due to load error.")
-                    cross_attention_kwargs = None # Ensure no LoRA effect
-
-                    # Attempt to clean up the failed/partially loaded adapter
-                    if hasattr(self.pipe, "delete_adapters") and \
-                       hasattr(self.pipe, "peft_config") and \
-                       self.pipe.peft_config is not None and \
-                       self.current_lora_adapter_name in self.pipe.peft_config:
-                        try:
-                            self.pipe.delete_adapters(self.current_lora_adapter_name)
-                            print(f"  Cleaned up failed LoRA adapter '{self.current_lora_adapter_name}'.")
-                        except Exception as cleanup_e:
-                            print(f"  Error cleaning up failed LoRA adapter: {cleanup_e}")
+                    self._unload_active_lora() # Attempt to clean up if load failed
+            elif self.active_lora_scale != lora_scale: # Same LoRA path, but different scale
+                print(f"  Updating scale for active LoRA: {os.path.basename(self.active_lora_path)}. Old scale: {self.active_lora_scale}, New scale: {lora_scale}")
+                if hasattr(self.pipe, "set_adapters"):
+                    self.pipe.set_adapters([self.lora_adapter_name], adapter_weights=[lora_scale])
+                    self.active_lora_scale = lora_scale
+                    print(f"  Adapter '{self.lora_adapter_name}' scale updated to {lora_scale}.")
+                else:
+                    print(f"  Warning: pipe does not have set_adapters. Cannot update LoRA scale dynamically.")
+            else: # LoRA path and scale are already active
+                print(f"  LoRA {os.path.basename(lora_path)} with scale {lora_scale} is already active. No change needed.")
+        else: # No LoRA is requested for this prediction
+            if self.active_lora_path is not None: # A LoRA is active, but not requested now
+                print(f"  No LoRA requested. Unloading currently active LoRA: {os.path.basename(self.active_lora_path)}")
+                self._unload_active_lora()
             else:
-                print(f"  Warning: LoRA file not found at: {lora_path}. Proceeding without LoRA for this request.")
-                cross_attention_kwargs = None
-        else:
-            print("  No LoRA path provided for this request. Proceeding without LoRA.")
-            cross_attention_kwargs = None # Explicitly ensure no LoRA effect
-        # --- End LoRA Handling ---
+                print("  No LoRA requested, and no LoRA is currently active.")
+        # --- End Smarter LoRA Management ---
 
-        # --- Seed Generation ---
         if seed is None:
-            # Use a CPU generator for the base seed to ensure reproducibility across devices if needed
             base_seed = torch.Generator(device='cpu').manual_seed(int.from_bytes(os.urandom(4), "big")).initial_seed()
         else:
             base_seed = seed
-        # Create per-output generators on the target device
         generators = [torch.Generator(device=self.device).manual_seed(base_seed + i) for i in range(num_outputs)]
-        print(f"  Base Seed: {base_seed}, Num Outputs: {num_outputs}")
+        print(f"  Base Seed: {base_seed}, Num Outputs: {num_outputs}, Steps: {num_inference_steps}, Guidance: {guidance_scale}")
 
-        # --- Inference ---
         output_paths = []
         try:
-            print(f"  Running pipeline with {num_inference_steps} steps...")
-            # Using autocast for mixed precision if on CUDA
+            print(f"  Running pipeline...")
             with torch.autocast(device_type=self.device, dtype=TORCH_DTYPE, enabled=(self.device=='cuda')):
                 pipeline_output = self.pipe(
                     prompt=prompt,
                     negative_prompt=negative_prompt if negative_prompt else None,
                     height=height,
                     width=width,
-                    num_inference_steps=num_inference_steps, # Value from rp_handler (already validated)
+                    num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     num_images_per_prompt=num_outputs,
                     generator=generators,
-                    output_type="pil", # Request PIL images
-                    cross_attention_kwargs=cross_attention_kwargs
+                    output_type="pil"
                 )
             images: List[Image.Image] = pipeline_output.images
             print(f"  Pipeline execution completed. Received {len(images)} image(s).")
 
-            # --- Save Images ---
-            save_dir = "/tmp/generated_images" # Save to a specific subdirectory
+            save_dir = "/tmp/generated_images"
             os.makedirs(save_dir, exist_ok=True)
             for i, img in enumerate(images):
-                current_seed = base_seed + i # The actual seed used for this specific image
-                # Create a unique filename for the image
+                current_seed = base_seed + i
                 img_filename = f"gen_seed{current_seed}_{uuid.uuid4()}.png"
                 output_path = os.path.join(save_dir, img_filename)
                 try:
@@ -345,18 +342,16 @@ class Predictor:
                         print(f"  Warning: Image {i+1} (Seed: {current_seed}) is None, skipping save.")
                         continue
                     img.save(output_path)
-                    output_paths.append((output_path, current_seed)) # Return path and the seed used for it
+                    output_paths.append((output_path, current_seed))
                     print(f"  Saved image {i+1} to {output_path} (Seed: {current_seed})")
                 except Exception as save_err:
                     print(f"  Error saving image {i+1} (Seed: {current_seed}) to {output_path}: {save_err}")
-                    # Optionally, decide if you want to append a failure placeholder here
 
         except Exception as predict_err:
             print(f"  ERROR during pipeline execution or image saving: {predict_err}")
             traceback.print_exc()
-            output_paths = [] # Ensure empty list on major prediction error
+            output_paths = []
         finally:
-            # CUDA cache cleanup
             if torch.cuda.is_available():
                 gc.collect()
                 torch.cuda.empty_cache()
