@@ -1,4 +1,4 @@
-# rp_handler.py
+# rp_handler.py - Fixed LoRA Management
 import os
 import uuid
 import io
@@ -6,6 +6,7 @@ import traceback
 import requests
 from pathlib import Path
 import time
+import hashlib
 from typing import Optional # For type hinting
 
 import runpod
@@ -25,6 +26,9 @@ import predict
 # Global predictor instance
 MODEL: Optional[predict.Predictor] = None # Type hint
 
+# Global LoRA cache to avoid re-downloading the same LoRA
+LORA_CACHE = {}  # {url_hash: file_path}
+
 # --- download_file function ---
 def download_file(url, save_path):
     """Downloads a file from a URL to a local path."""
@@ -43,6 +47,45 @@ def download_file(url, save_path):
     except Exception as e:
         print(f"An unexpected error occurred during download: {e}")
         return False
+
+def get_url_hash(url: str) -> str:
+    """Generate a consistent hash for a URL to use as cache key."""
+    return hashlib.md5(url.encode()).hexdigest()[:16]
+
+def get_or_download_lora(lora_url: str) -> Optional[str]:
+    """
+    Get LoRA file path, downloading and caching if needed.
+    Returns the file path if successful, None otherwise.
+    """
+    global LORA_CACHE
+    
+    if not lora_url:
+        return None
+        
+    url_hash = get_url_hash(lora_url)
+    
+    # Check if we already have this LoRA cached
+    if url_hash in LORA_CACHE:
+        cached_path = LORA_CACHE[url_hash]
+        if os.path.exists(cached_path):
+            print(f"Using cached LoRA: {os.path.basename(cached_path)}")
+            return cached_path
+        else:
+            # Cached file was deleted, remove from cache
+            print(f"Cached LoRA file no longer exists, removing from cache")
+            del LORA_CACHE[url_hash]
+    
+    # Download the LoRA with a consistent filename based on URL hash
+    lora_filename = f"/tmp/lora_cache_{url_hash}.safetensors"
+    print(f"Downloading new LoRA (hash: {url_hash})...")
+    
+    if download_file(lora_url, lora_filename):
+        LORA_CACHE[url_hash] = lora_filename
+        print(f"LoRA downloaded and cached: {os.path.basename(lora_filename)}")
+        return lora_filename
+    else:
+        print("LoRA download failed")
+        return None
 
 # --- upload_to_r2 function (with previous fixes) ---
 def upload_to_r2(image_bytes, bucket_name, object_key, r2_config):
@@ -149,30 +192,21 @@ def run(job):
             return {"error": f"Model predictor failed to initialize: {e}"}
     # --- End Initialization ---
 
-
-    # --- Download LoRA (if needed) ---
-    # LoRA is loaded/unloaded *inside* the predict method based on the path
-    lora_download_path = None
+    # --- Get LoRA (using cache) ---
+    lora_file_path = None
     lora_file_available = False
-    temp_lora_file_to_clean = None
 
     if lora_url:
-        print("LoRA URL provided, attempting download...")
-        # Use a unique temp filename
-        temp_lora_filename = f"/tmp/downloaded_lora_{uuid.uuid4()}.safetensors"
-        if download_file(lora_url, temp_lora_filename):
-            lora_download_path = temp_lora_filename # Store path for predict()
+        print(f"LoRA URL provided: {lora_url}")
+        lora_file_path = get_or_download_lora(lora_url)
+        if lora_file_path:
             lora_file_available = True
-            temp_lora_file_to_clean = temp_lora_filename # Mark for cleanup
-            print(f"LoRA downloaded successfully to {lora_download_path}")
+            print(f"LoRA ready: {os.path.basename(lora_file_path)}")
         else:
-            print("Warning: LoRA download failed. Will proceed without LoRA.")
-            # Consider returning an error if LoRA is essential for the job
-            # return {"error": f"Failed to download required LoRA from {lora_url}"}
+            print("Warning: LoRA could not be obtained. Will proceed without LoRA.")
     else:
         print("No LoRA URL provided.")
-    # --- End LoRA Download ---
-
+    # --- End LoRA Handling ---
 
     # --- Process Generation Tasks ---
     job_output = {
@@ -191,12 +225,6 @@ def run(job):
             num_outputs = task.get('num_outputs', 1)
             seed = task.get('seed') if task.get('seed') is not None else int.from_bytes(os.urandom(4), "big")
 
-            # Ensure minimum steps, default to predictor's minimum if not specified
-            # num_inference_steps_input = task.get('num_inference_steps', predict.MIN_INFERENCE_STEPS)
-            # num_inference_steps = max(num_inference_steps_input, predict.MIN_INFERENCE_STEPS)
-            # if num_inference_steps != num_inference_steps_input:
-            #      print(f"  Adjusted inference steps from {num_inference_steps_input} to {num_inference_steps}")
-
             print(f"  Prompt: {prompt[:100]}...")
             print(f"  Num Outputs: {num_outputs}, Seed: {seed}, Steps: {num_inference_steps}")
             print(f"  LoRA File Available: {lora_file_available}, Requested Scale: {lora_scale_input}")
@@ -210,7 +238,7 @@ def run(job):
                 "num_inference_steps": num_inference_steps,
                 "num_outputs": num_outputs,
                 "seed": seed,
-                "lora_path": lora_download_path if lora_file_available else None,
+                "lora_path": lora_file_path if lora_file_available else None,
                 "lora_scale": lora_scale_input,
             }
 
@@ -303,7 +331,6 @@ def run(job):
                                 "url": None, "seed": seed + i, "error": task_results["error"]
                           })
 
-
             task_end_time = time.time()
             task_results["task_duration_seconds"] = round(task_end_time - task_start_time, 2)
             job_output["generations"].append(task_results)
@@ -315,15 +342,8 @@ def run(job):
     finally:
         # --- Cleanup ---
         print("Starting cleanup...")
-        # Cleanup downloaded LoRA file
-        if temp_lora_file_to_clean and os.path.exists(temp_lora_file_to_clean):
-            try:
-                os.remove(temp_lora_file_to_clean)
-                print(f"Removed temporary LoRA file: {temp_lora_file_to_clean}")
-            except OSError as e:
-                print(f"Error removing temporary LoRA file {temp_lora_file_to_clean}: {e}")
-
-        # Cleanup successfully generated local image files
+        
+        # Only clean up generated image files, NOT cached LoRA files
         cleaned_images = 0
         for path in temp_image_paths_to_clean:
             if os.path.exists(path): # Check existence again just in case
@@ -333,11 +353,16 @@ def run(job):
                 except OSError as e:
                     print(f"Error removing temporary image file {path}: {e}")
         print(f"Removed {cleaned_images} successfully generated temporary image files.")
+        
+        # Note: We intentionally DON'T clean up cached LoRA files to avoid re-downloading
+        print(f"Keeping {len(LORA_CACHE)} cached LoRA files for future requests")
+        
         # RunPod cleanup (usually not needed with manual handling)
         # rp_cleanup.clean(['input_objects'])
         print("Cleanup finished.")
-        print("@@@ Removing TEMP AGAIN @@@")
-        clean(folder_list=["/tmp/"])
+        print("@@@ Removing TEMP IMAGES ONLY @@@")
+        # Don't clean ALL /tmp/ as it will remove our cached LoRAs
+        # clean(folder_list=["/tmp/"])
         # --- End Cleanup ---
 
     return job_output
